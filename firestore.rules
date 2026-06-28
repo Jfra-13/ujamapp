@@ -1,0 +1,77 @@
+rules_version = '2';
+
+// Reglas de seguridad de ujamapp.
+// Modelo: users/{uid}, jams/{jamId}, jams/{jamId}/participants/{userId}.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // --- Perfil de usuario -------------------------------------------------
+    match /users/{userId} {
+      // Cualquier usuario logueado puede ver perfiles (apodo, stats, insignias).
+      allow read: if signedIn();
+
+      // ponytail: MVP sin Cloud Functions -> el cliente escribe sus propios
+      // points/stats. Techo conocido: confiar en el cliente (se puede falsear).
+      // Mover el cálculo de puntos a Cloud Functions cuando los puntos importen.
+      allow write: if signedIn() && request.auth.uid == userId;
+    }
+
+    // --- Jam ----------------------------------------------------------------
+    match /jams/{jamId} {
+      function isAdmin() {
+        return signedIn() && request.auth.uid == resource.data.adminId;
+      }
+      function isMember() {
+        return signedIn() &&
+          (request.auth.uid == resource.data.adminId ||
+           request.auth.uid in resource.data.memberIds);
+      }
+
+      // Solo miembros y admin leen el Jam.
+      allow read: if isMember();
+
+      // Al crear, el creador queda como admin.
+      allow create: if signedIn() &&
+        request.resource.data.adminId == request.auth.uid;
+
+      // Solo el admin edita o borra el Jam (incluye gestionar memberIds).
+      allow update, delete: if isAdmin();
+
+      // ponytail: auto-unirse (que un usuario se agregue a memberIds) no está
+      // habilitado aquí. El ingreso por invitación/aprobación (Apéndice C) lo
+      // gestiona el admin o una Cloud Function. Agregar la regla fina al
+      // construir ese flujo (validar que solo se agregue su propio uid).
+
+      // --- Participación dentro del Jam ------------------------------------
+      match /participants/{userId} {
+        function jam() {
+          return get(/databases/$(database)/documents/jams/$(jamId)).data;
+        }
+        function isJamAdmin() {
+          return signedIn() && request.auth.uid == jam().adminId;
+        }
+        function isJamMember() {
+          return signedIn() &&
+            (request.auth.uid == jam().adminId ||
+             request.auth.uid in jam().memberIds);
+        }
+        function isOwner() {
+          return signedIn() && request.auth.uid == userId;
+        }
+
+        allow read: if isJamMember();
+
+        // El dueño edita su participación (elegir items, subir voucher) pero NO
+        // puede auto-validarse: marcar 'verde' es exclusivo del admin.
+        allow create, update: if isJamAdmin() ||
+          (isOwner() && request.resource.data.status != 'verde');
+
+        allow delete: if isJamAdmin();
+      }
+    }
+  }
+}
